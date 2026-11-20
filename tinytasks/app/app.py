@@ -1,8 +1,13 @@
-import os, time
+import os
+import time
+from contextlib import closing
+
 import psycopg2
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "devsecret")
+
 DB = {
     "host": os.getenv("DB_HOST", "db"),
     "port": int(os.getenv("DB_PORT", "5432")),
@@ -10,64 +15,103 @@ DB = {
     "user": os.getenv("DB_USER", "appuser"),
     "pass": os.getenv("DB_PASS", "changeme123"),
 }
+
+
 def get_conn():
     return psycopg2.connect(
-    host=DB["host"], port=DB["port"], dbname=DB["name"],
-    user=DB["user"], password=DB["pass"]
+        host=DB["host"],
+        port=DB["port"],
+        dbname=DB["name"],
+        user=DB["user"],
+        password=DB["pass"],
+        connect_timeout=3,
     )
+
+
 def init_db(retries=10):
-    for i in range(retries):
+    for attempt in range(retries):
         try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS tasks(
-                        id SERIAL PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        done BOOLEAN NOT NULL DEFAULT FALSE,
-                        created_at TIMESTAMP NOT NULL DEFAULT
-NOW()
-                        );
-                    """)
-                    conn.commit()
+            with closing(get_conn()) as conn:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            CREATE TABLE IF NOT EXISTS tasks (
+                                id SERIAL PRIMARY KEY,
+                                title TEXT NOT NULL,
+                                done BOOLEAN NOT NULL DEFAULT FALSE,
+                                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                            );
+                        """)
             return
-        except Exception as e:
-            print(f"[init_db] waiting for db... ({i+1}/{retries})
-            {e}")
+        except psycopg2.Error as error:
+            print(
+                f"[init_db] waiting for db... "
+                f"({attempt + 1}/{retries}) {error}",
+                flush=True,
+            )
+            if attempt == retries - 1:
+                raise RuntimeError("DB not ready after retries") from error
             time.sleep(2)
-        raise RuntimeError("DB not ready after retries")
+
+
 @app.get("/health")
 def health():
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
+        with closing(get_conn()) as conn:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
         return {"ok": True}, 200
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+    except psycopg2.Error as error:
+        return {"ok": False, "error": str(error)}, 500
+
+
 @app.get("/tasks")
 def list_tasks():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title, done, created_at FROM tasks ORDER BY id;")
-            rows = cur.fetchall()
+    with closing(get_conn()) as conn:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, title, done, created_at "
+                    "FROM tasks ORDER BY id;"
+                )
+                rows = cur.fetchall()
+
     return jsonify([
-        {"id": r[0], "title": r[1], "done": r[2], "created_at":r[3].isoformat()}
-    for r in rows
-])
+        {
+            "id": row[0],
+            "title": row[1],
+            "done": row[2],
+            "created_at": row[3].isoformat(),
+        }
+        for row in rows
+    ])
+
+
 @app.post("/tasks")
 def add_task():
     data = request.get_json(force=True)
+    if not isinstance(data, dict):
+        return {"error": "JSON object required"}, 400
+
     title = data.get("title")
-    if not title: return {"error":"title required"}, 400
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO tasks(title)"
-            " VALUES (%s)RETURNING id;", (title,))
-            
-            new_id = cur.fetchone()[0]
-            conn.commit()
+    if not isinstance(title, str) or not title.strip():
+        return {"error": "title required"}, 400
+
+    with closing(get_conn()) as conn:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO tasks(title) VALUES (%s) RETURNING id;",
+                    (title,),
+                )
+                new_id = cur.fetchone()[0]
+
     return {"id": new_id, "title": title, "done": False}, 201
+
+
+# Gunicorn imports this module, so initialize the table on import.
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=8080)
