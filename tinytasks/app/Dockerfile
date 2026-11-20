@@ -7,8 +7,8 @@ RUN pip install --upgrade pip && \
 # ---- runtime ----
 FROM python:3.12-slim
 # minimal utils for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl
-&& rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 # non-root user
 RUN useradd -m -u 1000 appuser
 WORKDIR /app
