@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TinyTasks — Security Dashboard</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<header>
+  <h1>TinyTasks</h1>
+  <nav>
+    <button data-page="home">Home</button>
+    <button data-page="tasks">Tasks</button>
+    <button data-page="docker101">Docker 101</button>
+    <button data-page="security">Security Dashboard</button>
+    <button data-page="debug">Debug Tips</button>
+  </nav>
+</header>
+
+<main>
+  <section id="home" class="page active">
+    <h2>Welcome</h2>
+    <p>This UI talks to the API and shows live security checks from inside the container.</p>
+    <div id="healthBox" class="card">
+      <h3>API Health</h3>
+      <pre id="healthOut">Loading…</pre>
+    </div>
+  </section>
+
+  <section id="tasks" class="page">
+    <h2>Tasks</h2>
+    <form id="addForm">
+      <input id="titleInput" placeholder="New task title" required/>
+      <button type="submit">Add</button>
+    </form>
+    <pre id="tasksOut" class="card">Loading…</pre>
+  </section>
+
+  <section id="docker101" class="page">
+    <h2>Docker 101 (quick)</h2>
+    <ul>
+      <li><b>Image:</b> the template; built from a Dockerfile.</li>
+      <li><b>Container:</b> a running instance of an image.</li>
+      <li><b>Compose:</b> runs multi-service apps (db+api+ui).</li>
+      <li><b>Why Docker?</b> Same app, same deps, any host.</li>
+    </ul>
+    <p>Pipeline: <code>Dockerfile → build image → run container → healthcheck → logs</code></p>
+  </section>
+
+  <section id="security" class="page">
+    <h2>Security Dashboard</h2>
+    <p>These checks verify you ran the API with our hardening flags.</p>
+    <ul id="secList" class="checklist">
+      <li id="sec-nonroot">Container runs as non-root (uid != 0) — <span>checking…</span></li>
+      <li id="sec-rofs">Readonly filesystem (write in / fails) — <span>checking…</span></li>
+      <li id="sec-nnp">No-New-Privileges (kernel) — <span>checking…</span></li>
+      <li id="sec-health">/health returns 200 OK — <span>checking…</span></li>
+    </ul>
+    <pre id="secRaw" class="card"></pre>
+  </section>
+
+  <section id="debug" class="page">
+    <h2>Debug Tips</h2>
+    <pre>
+docker compose ps
+docker compose logs --tail=100 api
+docker compose logs --tail=100 db
+# Port conflict? change 8083:8080 → 18083:8080 (api) or stop the blocker.
+# Reset dev state: docker compose down -v && docker compose up -d --build
+    </pre>
+  </section>
+</main>
+
+<footer><small>© Class Lab • TinyTasks</small></footer>
+<script src="app.js"></script>
+</body>
+</html>

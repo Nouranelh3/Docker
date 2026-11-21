@@ -1,0 +1,651 @@
+# TinyTasks + Frontend Security Dashboard — Comprehensive Lab Guide
+
+This lab extends TinyTasks (API + Postgres) with a teaching-focused frontend that verifies your Docker security requirements in real time. It is written to be unambiguous and cross‑platform (Windows + WSL2, macOS, Ubuntu).
+
+---
+
+## Learning Outcomes
+
+By the end you can:
+
+ Deploy a 3‑service Docker Compose stack (`db`, `api`, `ui`).
+ Implement hardening basics: non‑root, read‑only FS, drop capabilities, no‑new‑privileges, healthchecks.
+ Verify hardening live from a frontend Security Dashboard.
+ Troubleshoot common cross‑OS issues using a structured, error‑driven approach.
+
+---
+
+## At‑a‑Glance Checklist (Do these in order)
+
+1. Pre‑flight checks (Docker/Compose versions, CPU arch, ports).
+2. Create project folders/files (copy‑paste provided code exactly).
+3. Build & run the stack with Compose.
+4. Smoke test API and UI endpoints.
+5. Verify Security Dashboard shows all PASS.
+6. Debug if anything fails (use the troubleshooting playbook).
+7. Submit required artifacts.
+
+---
+
+## 0) Pre‑Flight Checks (All Students)
+
+Run these and note the outputs in case you need help later.
+
+```bash
+docker --version && docker compose version
+uname -m   # arm64 or x86_64
+```
+
+Reserve the following local ports:
+
+ 8083 → API (published as host:8083 → container:8080)
+ 8084 → UI (host:8084 → container:80)
+
+If a port is in use, you can change host port later (e.g., `18083:8080`, `18084:80`).
+
+> Windows: Use Docker Desktop with WSL2. Keep project files under `\\wsl$\<distro>\home\<you>\...` for performance.
+> Ubuntu: Ensure your user is in the `docker` group (see Troubleshooting).
+
+---
+
+## 1) Project Structure
+
+Create a working folder (e.g., `tinytasks/`) with this exact layout:
+
+```
+tinytasks/
+ ├─ app/
+ │   ├─ app.py
+ │   ├─ requirements.txt
+ │   └─ Dockerfile
+ ├─ frontend/
+ │   ├─ Dockerfile
+ │   ├─ nginx.conf
+ │   ├─ index.html
+ │   ├─ app.js
+ │   └─ styles.css
+ ├─ docker-compose.yml
+ └─ .env
+```
+
+> Tip: Copy‑paste code blocks exactly. Where your OS differs (paths, line endings), adapt but keep values consistent.
+
+---
+
+## 2) API Service (Flask) — Files
+
+### `app/requirements.txt`
+
+```
+flask==3.0.3
+psycopg2-binary==2.9.9
+gunicorn==22.0.0
+flask-cors==4.0.0
+```
+
+### `app/app.py`
+
+```python
+import os, time, re
+import psycopg2
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)  # allow frontend at a different port during class
+
+DB = {
+    "host": os.getenv("DB_HOST", "db"),
+    "port": int(os.getenv("DB_PORT", "5432")),
+    "name": os.getenv("DB_NAME", "appdb"),
+    "user": os.getenv("DB_USER", "appuser"),
+    "pass": os.getenv("DB_PASS", "changeme123"),
+}
+
+def get_conn():
+    return psycopg2.connect(
+        host=DB["host"], port=DB["port"], dbname=DB["name"],
+        user=DB["user"], password=DB["pass"]
+    )
+
+def init_db(retries=10):
+    for i in range(retries):
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS tasks(
+                            id SERIAL PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            done BOOLEAN NOT NULL DEFAULT FALSE,
+                            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                        );
+                        """
+                    )
+                    conn.commit()
+            return
+        except Exception as e:
+            print(f"[init_db] waiting for db... ({i+1}/{retries}) {e}")
+            time.sleep(2)
+    raise RuntimeError("DB not ready after retries")
+
+@app.get("/health")
+def health():
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+        return {"ok": True}, 200
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
+
+@app.get("/tasks")
+def list_tasks():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, title, done, created_at FROM tasks ORDER BY id;")
+            rows = cur.fetchall()
+    return jsonify([
+        {"id": r[0], "title": r[1], "done": r[2], "created_at": r[3].isoformat()}
+        for r in rows
+    ])
+
+@app.post("/tasks")
+def add_task():
+    data = request.get_json(force=True)
+    title = data.get("title")
+    if not title: return {"error":"title required"}, 400
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO tasks(title) VALUES (%s) RETURNING id;", (title,))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+    return {"id": new_id, "title": title, "done": False}, 201
+
+@app.get("/security/info")
+def security_info():
+    uid = os.geteuid() if hasattr(os, "geteuid") else -1
+    # detect read-only by trying a write in /
+    readonly = True
+    try:
+        test_path = "/.rw_test"
+        with open(test_path, "w") as f: f.write("x")
+        os.remove(test_path)
+        readonly = False
+    except Exception:
+        readonly = True
+
+    caps = {"NoNewPrivs": None, "CapEff": None}
+    try:
+        with open("/proc/self/status") as f:
+            s = f.read()
+        m = re.search(r"NoNewPrivs:\s(\d+)", s); caps["NoNewPrivs"] = m.group(1) if m else None
+        m = re.search(r"CapEff:\s([0-9A-Fa-fx]+)", s); caps["CapEff"] = m.group(1) if m else None
+    except Exception as e:
+        caps["error"] = str(e)
+
+    return jsonify({
+        "uid": uid,
+        "readonly": readonly,
+        "caps": caps,
+        "env": {"HOSTNAME": os.getenv("HOSTNAME", "")}
+    })
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=8080)
+```
+
+### `app/Dockerfile` (multi‑stage, non‑root, healthcheck)
+
+```dockerfile
+# ---- builder ----
+FROM python:3.12-slim AS builder
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip wheel --no-cache-dir --no-deps -r requirements.txt -w /wheels
+
+# ---- runtime ----
+FROM python:3.12-slim
+# minimal utils for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/
+# non-root user
+RUN useradd -m -u 1000 appuser
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache /wheels/
+COPY app.py .
+
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -fsS http://localhost:8080/health || exit 1
+
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
+```
+
+---
+
+## 3) Frontend UI (NGINX static site) — Files
+
+### `frontend/Dockerfile`
+
+```dockerfile
+FROM nginx:alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY index.html /usr/share/nginx/html/
+COPY app.js /usr/share/nginx/html/
+COPY styles.css /usr/share/nginx/html/
+```
+
+### `frontend/nginx.conf`
+
+```nginx
+server {
+  listen 80;
+  server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
+  location / {
+    try_files $uri /index.html;
+  }
+}
+```
+
+### `frontend/index.html`
+
+```html
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TinyTasks — Security Dashboard</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<header>
+  <h1>TinyTasks</h1>
+  <nav>
+    <button data-page="home">Home</button>
+    <button data-page="tasks">Tasks</button>
+    <button data-page="docker101">Docker 101</button>
+    <button data-page="security">Security Dashboard</button>
+    <button data-page="debug">Debug Tips</button>
+  </nav>
+</header>
+
+<main>
+  <section id="home" class="page active">
+    <h2>Welcome</h2>
+    <p>This UI talks to the API and shows live security checks from inside the container.</p>
+    <div id="healthBox" class="card">
+      <h3>API Health</h3>
+      <pre id="healthOut">Loading…</pre>
+    </div>
+  </section>
+
+  <section id="tasks" class="page">
+    <h2>Tasks</h2>
+    <form id="addForm">
+      <input id="titleInput" placeholder="New task title" required/>
+      <button type="submit">Add</button>
+    </form>
+    <pre id="tasksOut" class="card">Loading…</pre>
+  </section>
+
+  <section id="docker101" class="page">
+    <h2>Docker 101 (quick)</h2>
+    <ul>
+      <li><b>Image:</b> the template; built from a Dockerfile.</li>
+      <li><b>Container:</b> a running instance of an image.</li>
+      <li><b>Compose:</b> runs multi-service apps (db+api+ui).</li>
+      <li><b>Why Docker?</b> Same app, same deps, any host.</li>
+    </ul>
+    <p>Pipeline: <code>Dockerfile → build image → run container → healthcheck → logs</code></p>
+  </section>
+
+  <section id="security" class="page">
+    <h2>Security Dashboard</h2>
+    <p>These checks verify you ran the API with our hardening flags.</p>
+    <ul id="secList" class="checklist">
+      <li id="sec-nonroot">Container runs as non-root (uid != 0) — <span>checking…</span></li>
+      <li id="sec-rofs">Readonly filesystem (write in / fails) — <span>checking…</span></li>
+      <li id="sec-nnp">No-New-Privileges (kernel) — <span>checking…</span></li>
+      <li id="sec-health">/health returns 200 OK — <span>checking…</span></li>
+    </ul>
+    <pre id="secRaw" class="card"></pre>
+  </section>
+
+  <section id="debug" class="page">
+    <h2>Debug Tips</h2>
+    <pre>
+docker compose ps
+docker compose logs --tail=100 api
+docker compose logs --tail=100 db
+# Port conflict? change 8083:8080 → 18083:8080 (api) or stop the blocker.
+# Reset dev state: docker compose down -v && docker compose up -d --build
+    </pre>
+  </section>
+</main>
+
+<footer><small>© Class Lab • TinyTasks</small></footer>
+<script src="app.js"></script>
+</body>
+</html>
+```
+
+### `frontend/app.js`
+
+```javascript
+const API = 'http://localhost:8083';
+
+function show(pageId){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById(pageId).classList.add('active');
+}
+document.querySelectorAll('nav button').forEach(b=>{
+  b.addEventListener('click', ()=> show(b.dataset.page));
+});
+
+async function getJSON(url){
+  const r = await fetch(url);
+  return {ok:r.ok, status:r.status, data: await r.json().catch(()=> ({}))};
+}
+
+async function loadHealth(){
+  const out = document.getElementById('healthOut');
+  try{
+    const res = await getJSON(`${API}/health`);
+    out.textContent = JSON.stringify(res, null, 2);
+  }catch(e){ out.textContent = e.toString(); }
+}
+
+async function loadTasks(){
+  const out = document.getElementById('tasksOut');
+  try{
+    const res = await getJSON(`${API}/tasks`);
+    out.textContent = JSON.stringify(res.data, null, 2);
+  }catch(e){ out.textContent = e.toString(); }
+}
+
+document.getElementById('addForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const title = document.getElementById('titleInput').value.trim();
+  if(!title) return;
+  await fetch(`${API}/tasks`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({title})
+  });
+  document.getElementById('titleInput').value='';
+  loadTasks();
+});
+
+function setCheck(id, pass, detail){
+  const li = document.getElementById(id);
+  const span = li.querySelector('span');
+  li.classList.toggle('ok', !!pass);
+  li.classList.toggle('bad', !pass);
+  span.textContent = pass ? 'PASS' : `FAIL${detail?': '+detail:''}`;
+}
+
+async function loadSecurity(){
+  const raw = document.getElementById('secRaw');
+  const resHealth = await getJSON(`${API}/health`);
+  const resInfo = await getJSON(`${API}/security/info`);
+  raw.textContent = JSON.stringify({health:resHealth, info:resInfo}, null, 2);
+
+  setCheck('sec-health', resHealth.ok && resHealth.status===200);
+  if(resInfo.ok){
+    const i = resInfo.data;
+    setCheck('sec-nonroot', i.uid !== 0, `uid=${i.uid}`);
+    setCheck('sec-rofs', !!i.readonly);
+    const nnp = i.caps && i.caps.NoNewPrivs === "1";
+    setCheck('sec-nnp', nnp, `NoNewPrivs=${i.caps?.NoNewPrivs}`);
+  } else {
+    setCheck('sec-nonroot', false, 'no data');
+    setCheck('sec-rofs', false, 'no data');
+    setCheck('sec-nnp', false, 'no data');
+  }
+}
+
+window.addEventListener('load', ()=>{
+  loadHealth(); loadTasks(); loadSecurity();
+});
+```
+
+### `frontend/styles.css`
+
+```css
+{box-sizing:border-box;font-family:system-ui,Segoe UI,Roboto,Arial}
+body{margin:0;background:#0b1220;color:#e6ebf2}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#0f172a;border-bottom:1px solid #233}
+h1{margin:0;font-size:18px}
+nav button{margin:0 4px;padding:8px 12px;border:1px solid #345;background:#142035;color:#cfe;cursor:pointer;border-radius:10px}
+nav button:hover{background:#1b2a44}
+main{max-width:900px;margin:24px auto;padding:0 16px}
+.page{display:none}
+.page.active{display:block}
+.card{background:#0f1a2e;border:1px solid #24344e;border-radius:12px;padding:12px;overflow:auto}
+.checklist li{margin:8px 0}
+.checklist li.ok span{color:#32d296;font-weight:700}
+.checklist li.bad span{color:#ff6b6b;font-weight:700}
+form input{padding:8px;border-radius:8px;border:1px solid #345;background:#0d1a2b;color:#def}
+form button{margin-left:8px;padding:8px 12px;border-radius:8px;border:1px solid #345;background:#1b2a44;color:#cfe}
+footer{padding:16px;text-align:center;color:#9ab;opacity:.8}
+```
+
+---
+
+## 4) Compose File & Environment
+
+### `.env` (development values; OK to submit)
+
+```
+POSTGRES_DB=appdb
+POSTGRES_USER=appuser
+POSTGRES_PASSWORD=changeme123
+SECRET_KEY=devsecret
+```
+
+### `docker-compose.yml`
+
+```yaml
+version: "3.9"
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build: ./app
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASS: ${POSTGRES_PASSWORD}
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8083:8080"
+    # Baseline hardening:
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    user: "1000:1000"
+    restart: unless-stopped
+
+  ui:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "8084:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+```
+
+> Note: If port 8083 or 8084 is busy on your machine, change the left side of the `ports` mapping (e.g., `18083:8080`, `18084:80`).
+
+---
+
+## 5) Build & Run (Single Command)
+
+```bash
+docker compose build && docker compose up -d
+```
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+Expected: `db` healthy, `api` running/healthy, `ui` running.
+
+---
+
+## 6) Smoke Tests (Validate Functionality)
+
+### API
+
+```bash
+curl http://localhost:8083/health
+curl http://localhost:8083/tasks
+curl -X POST http://localhost:8083/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title":"first task"}'
+curl http://localhost:8083/tasks
+```
+
+### UI
+
+Open `http://localhost:8084` in a browser.
+
+ Home shows `/health` response.
+ Tasks can add + list tasks.
+ Security Dashboard shows PASS/FAIL for: non‑root, read‑only FS, no‑new‑privileges, health.
+
+If any check is FAIL, revisit the `api` hardening flags or `USER` in the `Dockerfile`.
+
+---
+
+## 7) Why These Security Requirements Matter (Quick Map)
+
+ Non‑root user: limits impact if the app process is compromised.
+ Read‑only filesystem: blocks writes to `/`; reduces persistence and tampering; use tmpfs for ephemeral needs.
+ Drop capabilities: remove kernel powers not needed by the app; add back only `NET_BIND_SERVICE`.
+ No‑New‑Privileges: prevents escalation via `setuid`/`setcap` execs.
+ Healthchecks: enable automatic detection of bad releases/failed deps.
+
+---
+
+## 8) Troubleshooting Playbook 
+
+General diagnostics
+
+```bash
+docker compose ps
+docker compose logs --tail=100 api
+docker compose logs --tail=100 db
+```
+
+Port already in use
+
+ Change mapping: in `docker-compose.yml` set `ports: - "18083:8080"` (API) or stop the conflicting process.
+ Linux: find the blocker → `sudo ss -lntp | grep 8083` or `sudo lsof -i :8083`.
+
+Linux: permission to talk to daemon
+
+```bash
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+Log out/in if needed.
+
+Apple Silicon (arm64) image mismatch
+
+ Use official images (e.g., `postgres:16`, `nginx:alpine`, `python:3.12-slim`) — they are multi‑arch.
+
+Windows + WSL2 hiccups
+
+```powershell
+wsl --update
+# Restart Docker Desktop, keep project files in WSL path: \\wsl$\<distro>\...
+```
+
+Reset dev state (safe in development)
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+When asking for help, include: OS + CPU arch, Docker/Compose versions, exact command, the exact first 20 lines of the error, and relevant compose/.env snippets (no real secrets).
+
+---
+
+## 9) Deliverables (Turn‑in)
+
+1. Screenshot: `docker compose ps` showing all services up (db=healthy).
+2. Screenshot: UI Security Dashboard with all checks PASS.
+3. Screenshot: UI Tasks page listing at least one added task.
+4. Files: `docker-compose.yml`, `.env` (with placeholder password), `app/Dockerfile`, `app/app.py`, `frontend/`.
+5. Short write‑up (≤ 10 sentences): Explain how each hardening control reduces risk and one production lesson you learned.
+
+---
+
+## 10) Clean Up
+
+```bash
+docker compose down
+# Optional: delete DB volume for a clean slate
+docker volume rm $(docker volume ls -q | grep pgdata) 2>/dev/null || true
+```
+
+---
+
+## 11) Time‑Boxed Plan (Approx. 90–110 min)
+
+ 0–10 min: Pre‑flight + folder scaffolding.
+ 10–35 min: Paste API files, build image.
+ 35–55 min: Paste frontend files, finalize compose.
+ 55–75 min: Bring up stack + smoke tests.
+ 75–95 min: Verify Security Dashboard + fix any FAILs.
+ 95–110 min: Screenshots + short write‑up.
+
+---
+
+## Appendix A — Full Reference (for diffing)
+
+ See the exact code blocks above; if your results differ, copy from here verbatim.
+
+---
+
+## Student Note (read first)
+
+Everyone’s setup differs (Windows+WSL2, macOS, Ubuntu), so some commands may vary—this is normal. Prefer `docker compose …`; check basics: `docker --version`, `docker compose version`, and `uname -m` (arm64/x86_64). When errors appear, copy them verbatim and search with your OS/arch. Quick fixes: change `8083:8080`→`18083:8080`; on Linux, add yourself to the docker group; on Apple Silicon, use multi‑arch tags; on Windows, run `wsl --update` and restart Docker Desktop. Diagnose with `docker compose ps` and `docker compose logs`. If stuck (dev only): `docker compose down -v && up -d --build`. Never post real secrets; rotate immediately if you did.
