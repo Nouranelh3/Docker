@@ -1,0 +1,16 @@
+*{box-sizing:border-box;font-family:system-ui,Segoe UI,Roboto,Arial}
+body{margin:0;background:#0b1220;color:#e6ebf2}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#0f172a;border-bottom:1px solid #233}
+h1{margin:0;font-size:18px}
+nav button{margin:0 4px;padding:8px 12px;border:1px solid #345;background:#142035;color:#cfe;cursor:pointer;border-radius:10px}
+nav button:hover{background:#1b2a44}
+main{max-width:900px;margin:24px auto;padding:0 16px}
+.page{display:none}
+.page.active{display:block}
+.card{background:#0f1a2e;border:1px solid #24344e;border-radius:12px;padding:12px;overflow:auto}
+.checklist li{margin:8px 0}
+.checklist li.ok span{color:#32d296;font-weight:700}
+.checklist li.bad span{color:#ff6b6b;font-weight:700}
+form input{padding:8px;border-radius:8px;border:1px solid #345;background:#0d1a2b;color:#def}
+form button{margin-left:8px;padding:8px 12px;border-radius:8px;border:1px solid #345;background:#1b2a44;color:#cfe}
+footer{padding:16px;text-align:center;color:#9ab;opacity:.8}

@@ -28,6 +28,7 @@ services:
         condition: service_healthy
     ports:
       - "8083:8080"
+    # Baseline hardening:
     read_only: true
     tmpfs:
       - /tmp
@@ -38,6 +39,15 @@ services:
     security_opt:
       - no-new-privileges:true
     user: "1000:1000"
+    restart: unless-stopped
+
+  ui:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "8084:80"
     restart: unless-stopped
 
 volumes:
